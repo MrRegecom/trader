@@ -1,1 +1,4 @@
-
+data,ativo,direcao,setup,entrada,saida,resultado_r,resultado_pts,disciplina,quebrou_regras,comentarios
+2025-11-16,WINZ25,COMPRA,Candle 9,127000,127350,35,350,10,NAO,"Segui o plano certinho"
+2025-11-16,WINZ25,VENDA,Pullback VWAP,127400,127650,-25,-250,6,SIM,"Entrei tarde, fora das regras"
+2025-11-17,WINZ25,COMPRA,10:15 Direção,128000,128250,25,250,8,NAO,"Entrada alinhada com candle 10:15"
