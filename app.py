@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from io import StringIO
 import matplotlib.pyplot as plt
+import altair as alt
 
 # -----------------------------------------------------------------------------
 # CONFIG DA PÁGINA
@@ -14,6 +15,9 @@ st.set_page_config(
 )
 
 BANCA_INICIAL_PADRAO = 200.0
+MAX_TRADES_DIA = 5
+ALVO_GAIN_DIA = 200.0
+MAX_LOSS_DIA = -70.0  # -70 de loss
 
 # -----------------------------------------------------------------------------
 # FUNÇÕES DE CARGA
@@ -85,7 +89,7 @@ if "ativo" in df.columns and not df["ativo"].dropna().empty:
 
 ativo = st.sidebar.text_input("Ativo", value=ativo_sugestao)
 
-# Ponto de entrada / saída (informativo)
+# Ponto de entrada / saída
 entrada = st.sidebar.number_input("Ponto de entrada", value=0.0, step=5.0, format="%.1f")
 saida = st.sidebar.number_input("Ponto de saída", value=0.0, step=5.0, format="%.1f")
 
@@ -100,11 +104,6 @@ num_contratos = st.sidebar.number_input(
 # Quantidade de operações (parciais dentro do mesmo trade)
 qtd_operacoes = st.sidebar.number_input(
     "Quantidade de operações", min_value=1, value=1, step=1
-)
-
-# Pontos / Ticks de resultado (pode ser positivo ou negativo)
-pontos_ticks = st.sidebar.number_input(
-    "Pontos / Ticks (gain ou loss)", value=0.0, step=5.0, format="%.1f"
 )
 
 # Custo por ponto (R$) – mini índice ~0.20
@@ -131,36 +130,73 @@ seguiu_regras = st.sidebar.checkbox("Segui 100% minhas regras?", value=True)
 # Comentários gerais
 comentarios = st.sidebar.text_area("Comentários adicionais", height=80)
 
-# --- Cálculos automáticos usando PONTOS/TICKS ---
-# Resultado oficial em R$ = nº contratos x pontos x custo_ponto
-total_pontos = pontos_ticks
+# --- Cálculo automático de pontos/ticks a partir de entrada/saída ---
+if direcao == "COMPRA":
+    pontos_por_operacao = saida - entrada
+else:  # VENDA
+    pontos_por_operacao = entrada - saida
+
+total_pontos = pontos_por_operacao * qtd_operacoes
 resultado_estimado = total_pontos * num_contratos * custo_ponto
 
 st.sidebar.markdown(
+    f"**Pontos por operação**: `{pontos_por_operacao:.1f}` pts\n\n"
     f"**Total de pontos (gain/loss)**: `{total_pontos:.1f}` pts\n\n"
     f"**Resultado estimado (R$)**: `R$ {resultado_estimado:.2f}`"
 )
 
-# Função para calcular disciplina (0–100)
-def calcular_disciplina(seguiu: bool, resultado: float) -> int:
+# -----------------------------------------------------------------------------
+# DISCIPLINA BASEADA NAS REGRAS (5 trades, 200 gain, 70 loss)
+# -----------------------------------------------------------------------------
+def calcular_disciplina(
+    seguiu: bool,
+    resultado_trade: float,
+    trades_hoje: int,
+    lucro_dia_novo: float,
+    max_trades: int = MAX_TRADES_DIA,
+    alvo_gain: float = ALVO_GAIN_DIA,
+    max_loss: float = MAX_LOSS_DIA,
+) -> int:
     """
-    - Se seguir as regras e ficar positivo: 90 (faixa 71–100)
-    - Se seguir as regras e ficar negativo: 80 (disciplinado, mesmo com loss)
-    - Se NÃO seguir as regras e ficar positivo: 60 (faixa 41–70)
-    - Se NÃO seguir as regras e ficar negativo: 30 (faixa 0–40)
+    Score começa em 100 e aplica penalidades:
+    - Não seguiu regras: -30
+    - Excedeu nº máximo de trades no dia: -30
+    - Bateu stop de loss diário (<= max_loss): score máximo 30
+    - Bateu alvo de gain diário (>= alvo_gain): score máximo 90
     """
-    if seguiu:
-        if resultado >= 0:
-            return 90
-        else:
-            return 80
-    else:
-        if resultado >= 0:
-            return 60
-        else:
-            return 30
+    score = 100
 
-disciplina_nota = calcular_disciplina(seguiu_regras, resultado_estimado)
+    if not seguiu:
+        score -= 30
+
+    if trades_hoje > max_trades:
+        score -= 30
+
+    # Stop diário de loss
+    if lucro_dia_novo <= max_loss:
+        score = min(score, 30)
+
+    # Alvo diário de gain
+    if lucro_dia_novo >= alvo_gain:
+        score = min(score, 90)
+
+    score = max(0, min(100, score))
+    return int(round(score))
+
+# Quantos trades já existem neste dia (antes de incluir este)?
+df_dia_atual = df[df["data"].dt.date == data_trade]
+trades_hoje = df_dia_atual.shape[0] + 1  # contando este trade novo
+
+lucro_dia_atual = df_dia_atual["resultado_r"].sum()
+lucro_dia_novo = lucro_dia_atual + resultado_estimado
+
+disciplina_nota = calcular_disciplina(
+    seguiu_regras,
+    resultado_estimado,
+    trades_hoje,
+    lucro_dia_novo,
+)
+
 st.sidebar.markdown(f"### 🧭 Disciplina calculada: **{disciplina_nota} / 100**")
 
 # Botão para adicionar o trade ao diário (na sessão)
@@ -357,14 +393,14 @@ disc_txt = f"{media_disc_total:,.1f}" if not np.isnan(media_disc_total) else "�
 c12.metric("Disciplina média (0–100)", disc_txt)
 
 # -----------------------------------------------------------------------------
-# GRÁFICOS – BANCA, GAINS/LOSS, DISCIPLINA
+# GRÁFICOS – BANCA, GAINS/LOSS (verde/vermelho), DISCIPLINA
 # -----------------------------------------------------------------------------
 st.subheader("📈 Gráficos de evolução")
 
 # 1) Banca total (equity)
 equity_series = df_equity.set_index("data")["banca_fim_dia"]
 
-# 2) Gains x Loss trade a trade
+# 2) Gains x Loss trade a trade (com cores)
 df_sorted = df_filtrado.sort_values("data").copy()
 df_sorted["ganhos"] = df_sorted["resultado_r"].where(df_sorted["resultado_r"] > 0, 0)
 df_sorted["perdas"] = df_sorted["resultado_r"].where(df_sorted["resultado_r"] < 0, 0)
@@ -377,7 +413,29 @@ with g1:
 
 with g2:
     st.caption("Ganhos x perdas por trade")
-    st.line_chart(df_sorted.set_index("data")[["ganhos", "perdas"]])
+    chart_data = df_sorted.reset_index()[["data", "ganhos", "perdas"]]
+    chart = (
+        alt.Chart(chart_data)
+        .transform_fold(
+            ["ganhos", "perdas"], as_=["tipo", "valor"]
+        )
+        .mark_line()
+        .encode(
+            x="data:T",
+            y="valor:Q",
+            color=alt.condition(
+                alt.datum.tipo == "ganhos",
+                alt.value("green"),
+                alt.value("red"),
+            ),
+            strokeWidth=alt.condition(
+                alt.datum.tipo == "ganhos",
+                alt.value(3),
+                alt.value(1.5),
+            ),
+        )
+    )
+    st.altair_chart(chart, use_container_width=True)
 
 # 3) Disciplina média por dia
 if "disciplina" in df_filtrado.columns:
@@ -497,3 +555,9 @@ else:
         st.write("Nível do Termômetro")
         st.progress(min(termometro / 100, 1.0))
         st.caption(ctx_info_text)
+
+# -----------------------------------------------------------------------------
+# RODAPÉ – REGRAS DO SETUP
+# -----------------------------------------------------------------------------
+st.markdown("---")
+st.caption("setup – **5 trades / dia** • **200 gain** • **70 loss**")
