@@ -1,9 +1,10 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from io import StringIO
 
 # -----------------------------------------------------------------------------
-# CONFIG BÁSICA DA PÁGINA
+# CONFIG DA PÁGINA
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Termômetro do Trader",
@@ -11,30 +12,11 @@ st.set_page_config(
     layout="wide",
 )
 
-st.markdown(
-    """
-    <style>
-    .big-metric {
-        font-size: 1.6rem !important;
-        font-weight: 600 !important;
-    }
-    .sub-metric {
-        font-size: 0.9rem !important;
-        color: #666666 !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.title("🌡️ Termômetro do Trader")
-st.write("Dashboard de Daytrade: banca, performance, disciplina e contexto de mercado (Candle 9 / 10:15).")
-
 # -----------------------------------------------------------------------------
 # FUNÇÕES DE CARGA
 # -----------------------------------------------------------------------------
 @st.cache_data
-def carregar_trades(caminho: str = "trades.csv") -> pd.DataFrame:
+def carregar_trades_arquivo(caminho: str = "trades.csv") -> pd.DataFrame:
     df = pd.read_csv(caminho, parse_dates=["data"])
     df = df.sort_values("data")
     return df
@@ -46,10 +28,10 @@ def carregar_contexto(caminho: str = "contexto_dia.csv") -> pd.DataFrame:
     return df_ctx
 
 # -----------------------------------------------------------------------------
-# CARREGANDO DADOS
+# CARREGAR TRADES (BASE) E INICIAR SESSION_STATE
 # -----------------------------------------------------------------------------
 try:
-    df = carregar_trades()
+    df_base = carregar_trades_arquivo()
 except FileNotFoundError:
     st.error("Arquivo 'trades.csv' não encontrado na pasta do projeto.")
     st.stop()
@@ -65,18 +47,125 @@ except Exception as e:
     st.warning(f"Erro ao carregar 'contexto_dia.csv': {e}")
     df_ctx = None
 
-# Garante tipos mínimos
-if "resultado_r" not in df.columns:
-    st.error("A coluna 'resultado_r' não existe no trades.csv.")
-    st.stop()
+# garante tipos mínimos
+df_base["resultado_r"] = pd.to_numeric(df_base["resultado_r"], errors="coerce").fillna(0.0)
+df_base["data"] = pd.to_datetime(df_base["data"])
 
-df["resultado_r"] = pd.to_numeric(df["resultado_r"], errors="coerce").fillna(0.0)
-df["data"] = pd.to_datetime(df["data"])
+# session_state: df_trades é a planilha "viva" da sessão
+if "df_trades" not in st.session_state:
+    st.session_state["df_trades"] = df_base.copy()
+
+df = st.session_state["df_trades"]
 
 # -----------------------------------------------------------------------------
-# SIDEBAR – CONFIG E FILTROS
+# TÍTULO
 # -----------------------------------------------------------------------------
-st.sidebar.header("Configuração da Banca e Filtros")
+st.title("🌡️ Termômetro do Trader")
+st.write("Dashboard de Daytrade com diário do trader, banca, performance e contexto de mercado.")
+
+# -----------------------------------------------------------------------------
+# SIDEBAR – DIÁRIO DO TRADER + FILTROS
+# -----------------------------------------------------------------------------
+st.sidebar.header("📓 Diário do Trader - Novo Trade")
+
+# Data (auto hoje, mas editável)
+data_trade = st.sidebar.date_input("Data do trade")
+
+# Ativo com sugestão (último ativo ou WINZ25)
+ativo_sugestao = "WINZ25"
+if "ativo" in df.columns and not df["ativo"].dropna().empty:
+    ativo_sugestao = str(df["ativo"].iloc[-1])
+
+ativo = st.sidebar.text_input("Ativo", value=ativo_sugestao)
+
+# Ponto de entrada / saída
+entrada = st.sidebar.number_input("Ponto de entrada", value=0.0, step=5.0, format="%.1f")
+saida = st.sidebar.number_input("Ponto de saída", value=0.0, step=5.0, format="%.1f")
+
+# Direção
+direcao = st.sidebar.radio("Direção", options=["COMPRA", "VENDA"])
+
+# Setup do dia
+setup = st.sidebar.text_input("Setup do dia", value="")
+
+# Motivo da Entrada
+motivo_entrada = st.sidebar.text_area("Motivo da entrada", height=80)
+
+# Resultado (R$)
+resultado_r = st.sidebar.number_input("Resultado (R$)", value=0.0, step=5.0, format="%.2f")
+
+# Emocional
+emocional = st.sidebar.selectbox(
+    "Emocional",
+    options=["Calmo", "Confiante", "Neutro", "Ansioso", "Com medo", "Eufórico"],
+    index=2,
+)
+
+# Seguiu as regras?
+seguiu_regras = st.sidebar.checkbox("Segui 100% minhas regras?", value=True)
+
+# Comentários gerais
+comentarios = st.sidebar.text_area("Comentários adicionais", height=80)
+
+# Função para calcular disciplina
+def calcular_disciplina(seguiu: bool, resultado: float) -> int:
+    """
+    Regras que você descreveu:
+    - Se seguir as regras e ficar positivo: 71 a 100 (vamos usar 90)
+    - Se seguir as regras e ficar negativo: ainda disciplinado (vamos usar 80)
+    - Se NÃO seguir as regras e ficar positivo: 41 a 70 (vamos usar 60)
+    - Se NÃO seguir as regras e ficar negativo: 0 a 40 (vamos usar 30)
+    """
+    if seguiu:
+        if resultado >= 0:
+            return 90
+        else:
+            return 80
+    else:
+        if resultado >= 0:
+            return 60
+        else:
+            return 30
+
+# Botão para adicionar o trade ao diário
+if st.sidebar.button("➕ Adicionar ao diário"):
+    # calcula resultado em pontos (bem simples: saída - entrada, ajusta para compra/venda)
+    if direcao == "COMPRA":
+        resultado_pts = saida - entrada
+    else:
+        resultado_pts = entrada - saida
+
+    disciplina_nota = calcular_disciplina(seguiu_regras, resultado_r)
+    quebrou_regras = "NAO" if seguiu_regras else "SIM"
+
+    nova_linha = {
+        "data": pd.to_datetime(data_trade),
+        "ativo": ativo,
+        "direcao": direcao,
+        "setup": setup,
+        "entrada": entrada,
+        "saida": saida,
+        "resultado_r": resultado_r,
+        "resultado_pts": resultado_pts,
+        "disciplina": disciplina_nota,
+        "quebrou_regras": quebrou_regras,
+        "comentarios": comentarios,
+        "motivo_entrada": motivo_entrada,
+        "emocional": emocional,
+    }
+
+    # garante que todas as colunas existem
+    for col in nova_linha.keys():
+        if col not in df.columns:
+            df[col] = np.nan
+
+    st.session_state["df_trades"] = pd.concat([df, pd.DataFrame([nova_linha])], ignore_index=True)
+    df = st.session_state["df_trades"]
+    st.sidebar.success("Trade adicionado ao diário na sessão atual! ✅")
+
+# Separador na sidebar para filtros
+st.sidebar.markdown("---")
+st.sidebar.header("Filtros de visualização")
 
 banca_inicial = st.sidebar.number_input(
     "Banca inicial (R$)", min_value=0.0, value=200.0, step=50.0
@@ -86,7 +175,7 @@ datas_disponiveis = df["data"].dt.date.unique()
 datas_disponiveis = np.sort(datas_disponiveis)
 
 if len(datas_disponiveis) == 0:
-    st.info("Nenhum dado em trades.csv.")
+    st.info("Nenhum dado em trades (nem da planilha e nem do diário).")
     st.stop()
 
 data_inicial = st.sidebar.date_input(
@@ -106,8 +195,19 @@ data_termometro = st.sidebar.selectbox(
     index=len(datas_disponiveis) - 1,
 )
 
+# Botão para baixar CSV atualizado (diário + base)
+st.sidebar.markdown("---")
+csv_buffer = StringIO()
+df.to_csv(csv_buffer, index=False)
+st.sidebar.download_button(
+    label="📥 Baixar trades.csv atualizado",
+    data=csv_buffer.getvalue(),
+    file_name="trades_atualizado.csv",
+    mime="text/csv",
+)
+
 # -----------------------------------------------------------------------------
-# FILTRAR TRADES
+# APLICAR FILTROS NOS TRADES
 # -----------------------------------------------------------------------------
 df_filtrado = df.copy()
 
@@ -162,7 +262,7 @@ lucro_total = banca_final - banca_inicial
 perc_total = (lucro_total / banca_inicial) * 100 if banca_inicial != 0 else np.nan
 
 # -----------------------------------------------------------------------------
-# ESTATÍSTICAS DE DAYTRADE (estilo Trademetria)
+# ESTATÍSTICAS GERAIS
 # -----------------------------------------------------------------------------
 total_trades = df_filtrado.shape[0]
 wins = df_filtrado[df_filtrado["resultado_r"] > 0]
@@ -173,164 +273,80 @@ qtd_losses = losses.shape[0]
 
 win_rate = (qtd_wins / total_trades) * 100 if total_trades > 0 else 0.0
 
-# % de acerto diário (dias positivos)
+# % acerto diário
 dias_positivos = df_dias[df_dias["lucro_dia"] > 0].shape[0]
 dias_totais = df_dias.shape[0]
 win_rate_dias = (dias_positivos / dias_totais) * 100 if dias_totais > 0 else 0.0
 
 # Fator de lucro
 gross_profit = wins["resultado_r"].sum()
-gross_loss = losses["resultado_r"].sum()  # negativo
+gross_loss = losses["resultado_r"].sum()
 profit_factor = gross_profit / abs(gross_loss) if gross_loss < 0 else np.nan
 
 # Expectativa por trade
 avg_win = wins["resultado_r"].mean() if not wins.empty else 0.0
-avg_loss = losses["resultado_r"].mean() if not losses.empty else 0.0  # negativo
+avg_loss = losses["resultado_r"].mean() if not losses.empty else 0.0
 prob_win = qtd_wins / total_trades if total_trades > 0 else 0.0
 prob_loss = 1 - prob_win
-
 expectativa_trade = prob_win * avg_win + prob_loss * avg_loss
 
-# Último dia (ganho do dia)
+# Último dia / mês / ano
 ultimo_dia = df_equity["data"].iloc[-1]
 lucro_ultimo_dia = df_equity["lucro_dia"].iloc[-1]
 perc_ultimo_dia = df_equity["perc_dia"].iloc[-1]
 
-# Ganho no mês (mês do último dia filtrado)
 mes_ref = ultimo_dia.month
 ano_ref = ultimo_dia.year
-df_mes = df_equity[
-    (df_equity["data"].dt.month == mes_ref) & (df_equity["data"].dt.year == ano_ref)
-]
+df_mes = df_equity[(df_equity["data"].dt.month == mes_ref) & (df_equity["data"].dt.year == ano_ref)]
 ganho_mes = df_mes["lucro_dia"].sum()
 
-# Ganho no ano
 df_ano = df_equity[df_equity["data"].dt.year == ano_ref]
 ganho_ano = df_ano["lucro_dia"].sum()
 
-# Ativo mais operado / mais lucrativo
-ativo_mais_op = (
-    df_filtrado["ativo"].value_counts().index[0]
-    if "ativo" in df_filtrado.columns and not df_filtrado["ativo"].value_counts().empty
-    else "-"
-)
-ativo_lucro = "-"
-if "ativo" in df_filtrado.columns:
-    lucro_por_ativo = df_filtrado.groupby("ativo")["resultado_r"].sum().sort_values(ascending=False)
-    if not lucro_por_ativo.empty:
-        ativo_lucro = f"{lucro_por_ativo.index[0]} (R$ {lucro_por_ativo.iloc[0]:.2f})"
+# -----------------------------------------------------------------------------
+# VISÃO GERAL (CARDS SIMPLES)
+# -----------------------------------------------------------------------------
+st.subheader("📊 Visão Geral")
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Banca inicial", f"R$ {banca_inicial:,.2f}")
+c2.metric("Banca atual", f"R$ {banca_final:,.2f}", f"{lucro_total:,.2f} R$")
+c3.metric("% acumulado", f"{perc_total:,.2f}%")
+c4.metric("Total de trades (filtro)", int(total_trades))
+
+c5, c6, c7, c8 = st.columns(4)
+c5.metric("Ganho último dia", f"R$ {lucro_ultimo_dia:,.2f}", f"{perc_ultimo_dia:,.2f}%")
+c6.metric("Ganho no mês", f"R$ {ganho_mes:,.2f}")
+c7.metric("Ganho no ano", f"R$ {ganho_ano:,.2f}")
+pf_txt = f"{profit_factor:,.2f}" if not np.isnan(profit_factor) else "–"
+c8.metric("Fator de lucro", pf_txt)
+
+c9, c10, c11, c12 = st.columns(4)
+c9.metric("Expectativa por trade", f"R$ {expectativa_trade:,.2f}")
+c10.metric("% acerto (trades)", f"{win_rate:,.2f}%", f"{qtd_wins} W / {qtd_losses} L")
+c11.metric("% acerto diário", f"{win_rate_dias:,.2f}%", f"{dias_positivos} dias positivos")
+media_disc_total = df_filtrado["disciplina"].mean() if "disciplina" in df_filtrado.columns else np.nan
+disc_txt = f"{media_disc_total:,.1f}" if not np.isnan(media_disc_total) else "–"
+c12.metric("Disciplina média (trades)", disc_txt)
 
 # -----------------------------------------------------------------------------
-# DASHBOARD PRINCIPAL – CARDS
+# GRÁFICOS
 # -----------------------------------------------------------------------------
-st.markdown("### 📊 Visão Geral do Daytrade")
+st.subheader("📈 Evolução da banca e do resultado diário")
+g1, g2 = st.columns(2)
 
-row1_col1, row1_col2, row1_col3, row1_col4 = st.columns(4)
+with g1:
+    st.caption("Equity Curve (banca ao final de cada dia)")
+    st.line_chart(df_equity.set_index("data")["banca_fim_dia"])
 
-with row1_col1:
-    st.markdown("**Saldo (banca atual)**")
-    st.markdown(f"<div class='big-metric'>R$ {banca_final:,.2f}</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='sub-metric'>Início: R$ {banca_inicial:,.2f} &nbsp; | &nbsp; Δ R$ {lucro_total:,.2f}</div>",
-        unsafe_allow_html=True,
-    )
-
-with row1_col2:
-    st.markdown("**Ganho último dia**")
-    st.markdown(f"<div class='big-metric'>R$ {lucro_ultimo_dia:,.2f}</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='sub-metric'>{perc_ultimo_dia:,.2f}% sobre a banca do dia</div>",
-        unsafe_allow_html=True,
-    )
-
-with row1_col3:
-    st.markdown("**Ganhos no mês**")
-    st.markdown(f"<div class='big-metric'>R$ {ganho_mes:,.2f}</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='sub-metric'>Referência: {mes_ref:02d}/{ano_ref}</div>",
-        unsafe_allow_html=True,
-    )
-
-with row1_col4:
-    st.markdown("**Ganhos no ano**")
-    st.markdown(f"<div class='big-metric'>R$ {ganho_ano:,.2f}</div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='sub-metric'>Ano: {ano_ref}</div>",
-        unsafe_allow_html=True,
-    )
-
-row2_col1, row2_col2, row2_col3, row2_col4 = st.columns(4)
-
-with row2_col1:
-    st.markdown("**Fator de lucro (liq/bruto)**")
-    if not np.isnan(profit_factor):
-        st.markdown(
-            f"<div class='big-metric'>{profit_factor:,.2f}</div>",
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown("<div class='big-metric'>–</div>", unsafe_allow_html=True)
-    st.markdown("<div class='sub-metric'>Bom &gt; 1.5</div>", unsafe_allow_html=True)
-
-with row2_col2:
-    st.markdown("**Expectativa por trade**")
-    st.markdown(
-        f"<div class='big-metric'>R$ {expectativa_trade:,.2f}</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown("<div class='sub-metric'>Valor médio esperado por operação</div>", unsafe_allow_html=True)
-
-with row2_col3:
-    st.markdown("**% de acerto (trades)**")
-    st.markdown(
-        f"<div class='big-metric'>{win_rate:,.2f}%</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f"<div class='sub-metric'>{qtd_wins} W  /  {qtd_losses} L  (total {total_trades})</div>",
-        unsafe_allow_html=True,
-    )
-
-with row2_col4:
-    st.markdown("**% de acerto diário**")
-    st.markdown(
-        f"<div class='big-metric'>{win_rate_dias:,.2f}%</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f"<div class='sub-metric'>{dias_positivos} dias positivos / {dias_totais} dias</div>",
-        unsafe_allow_html=True,
-    )
-
-# Info de ativos
-st.markdown("### 🎯 Ativos operados")
-col_a1, col_a2 = st.columns(2)
-with col_a1:
-    st.markdown("**Ativo mais operado**")
-    st.markdown(f"<div class='big-metric'>{ativo_mais_op}</div>", unsafe_allow_html=True)
-with col_a2:
-    st.markdown("**Ativo mais lucrativo**")
-    st.markdown(f"<div class='big-metric'>{ativo_lucro}</div>", unsafe_allow_html=True)
-
-# -----------------------------------------------------------------------------
-# GRÁFICOS – Banca e Lucro Diário
-# -----------------------------------------------------------------------------
-st.markdown("### 📈 Evolução da banca e do resultado diário")
-
-g_col1, g_col2 = st.columns(2)
-
-with g_col1:
-    st.subheader("Evolução da Banca (Equity Curve)")
-    st.area_chart(df_equity.set_index("data")["banca_fim_dia"])
-
-with g_col2:
-    st.subheader("Lucro por Dia")
+with g2:
+    st.caption("Lucro por dia (R$)")
     st.bar_chart(df_equity.set_index("data")["lucro_dia"])
 
 # -----------------------------------------------------------------------------
 # TABELA RESUMO POR DIA
 # -----------------------------------------------------------------------------
-st.markdown("### 🗓️ Resumo por dia (lucro, % e disciplina)")
+st.subheader("🗓️ Resumo por dia (lucro, % e disciplina)")
 st.dataframe(
     df_equity[
         ["data", "lucro_dia", "perc_dia", "qtd_trades", "media_disciplina"]
@@ -349,13 +365,13 @@ st.dataframe(
 # -----------------------------------------------------------------------------
 # TRADES DETALHADOS
 # -----------------------------------------------------------------------------
-st.markdown("### 📋 Trades detalhados (após filtros)")
+st.subheader("📋 Trades detalhados (após filtros)")
 st.dataframe(df_filtrado, use_container_width=True)
 
 # -----------------------------------------------------------------------------
 # TERMÔMETRO DO TRADER – DIA ESPECÍFICO
 # -----------------------------------------------------------------------------
-st.markdown(f"### 🌡️ Termômetro do Trader – {data_termometro}")
+st.subheader(f"🌡️ Termômetro do Trader – {data_termometro}")
 
 linha_dia = df_equity[df_equity["data"].dt.date == data_termometro]
 if linha_dia.empty:
@@ -363,29 +379,19 @@ if linha_dia.empty:
 else:
     linha_dia = linha_dia.iloc[0]
 
-    # Disciplina
-    disciplina_media = linha_dia["media_disciplina"] if "media_disciplina" in linha_dia else np.nan
-    if pd.isna(disciplina_media):
-        disciplina_media = 0.0
-    score_disciplina = disciplina_media * 10
-    peso_disciplina = 40
-    contrib_disciplina = (score_disciplina / 100) * peso_disciplina
+    disciplina_media = linha_dia["media_disciplina"] if not pd.isna(linha_dia["media_disciplina"]) else 0.0
+    score_disciplina = disciplina_media * 10 / 100 * 40  # normaliza para peso 40
 
-    # Resultado do dia
-    perc_dia = linha_dia["perc_dia"]  # %
+    perc_dia = linha_dia["perc_dia"]
     perc_clamp = max(min(perc_dia, 10), -10)
-
     if perc_clamp >= 2:
         score_resultado = 30
     elif perc_clamp <= -5:
         score_resultado = 0
     else:
         score_resultado = (perc_clamp + 5) / (2 + 5) * 30
+    contrib_resultado = score_resultado
 
-    peso_resultado = 30
-    contrib_resultado = (score_resultado / 30) * peso_resultado
-
-    # Direção + risco
     contrib_direcao = 0
     contrib_risco = 0
     ctx_info_text = "Sem contexto de Candle 9 / 10:15 / risco para este dia."
@@ -394,7 +400,6 @@ else:
         linha_ctx = df_ctx[df_ctx["data"].dt.date == data_termometro]
         if not linha_ctx.empty:
             ctx = linha_ctx.iloc[0]
-
             peso_direcao = 20
             if ctx["candle9_dir"] == ctx["candle1015_dir"]:
                 score_direcao = 20
@@ -415,7 +420,7 @@ else:
                 f"Comentário: {ctx['comentario_dia']}"
             )
 
-    termometro = contrib_disciplina + contrib_resultado + contrib_direcao + contrib_risco
+    termometro = score_disciplina + contrib_resultado + contrib_direcao + contrib_risco
     termometro = round(termometro, 1)
 
     col_t1, col_t2 = st.columns([1, 3])
