@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from io import StringIO
 import matplotlib.pyplot as plt
+import altair as alt  # novo: para gráficos bonitos
 
 # -----------------------------------------------------------------------------
 # CONFIG DA PÁGINA
@@ -175,9 +176,9 @@ if st.sidebar.button("➕ Adicionar ao diário"):
         "entrada": entrada,
         "saida": saida,
         "resultado_r": resultado_estimado,
-        "resultado_pts": total_pontos,        # <- guarda os pontos calculados
+        "resultado_pts": total_pontos,        # pontos calculados
         "num_contratos": num_contratos,
-        "qtd_operacoes": qtd_operacoes,      # <- só informativo/controle, NÃO entra no cálculo
+        "qtd_operacoes": qtd_operacoes,      # só controle, não entra no cálculo
         "custo_ponto": custo_ponto,
         "disciplina": disciplina_nota,
         "quebrou_regras": "NAO" if seguiu_regras else "SIM",
@@ -359,42 +360,93 @@ disc_txt = f"{media_disc_total:,.1f}" if not np.isnan(media_disc_total) else "�
 c12.metric("Disciplina média (0–100)", disc_txt)
 
 # -----------------------------------------------------------------------------
-# GRÁFICOS – BANCA, GAINS/LOSS, DISCIPLINA
+# GRÁFICOS – BANCA, GAINS/LOSS, DISCIPLINA (VERSÃO LINDA)
 # -----------------------------------------------------------------------------
 st.subheader("📈 Gráficos de evolução")
 
-# 1) Banca total (equity)
-equity_series = df_equity.set_index("data")["banca_fim_dia"]
+# 1) Equity Curve (banca ao longo do tempo)
+equity_chart_df = df_equity.copy()
 
-# 2) Gains x Loss trade a trade
+equity_chart = (
+    alt.Chart(equity_chart_df)
+    .mark_line(strokeWidth=3, color="#1f77b4")
+    .encode(
+        x=alt.X("data:T", title="Data"),
+        y=alt.Y("banca_fim_dia:Q", title="Banca (R$)"),
+        tooltip=["data", "banca_fim_dia"]
+    )
+    .properties(
+        height=300,
+        title="Evolução da Banca (Equity Curve)"
+    )
+)
+
+# 2) Ganhos x Perdas por trade (verde e vermelho)
 df_sorted = df_filtrado.sort_values("data").copy()
 df_sorted["ganhos"] = df_sorted["resultado_r"].where(df_sorted["resultado_r"] > 0, 0)
 df_sorted["perdas"] = df_sorted["resultado_r"].where(df_sorted["resultado_r"] < 0, 0)
 
-g1, g2 = st.columns(2)
+df_gl = df_sorted.melt(
+    id_vars=["data"],
+    value_vars=["ganhos", "perdas"],
+    var_name="tipo",
+    value_name="valor"
+)
 
-with g1:
-    st.caption("Banca total (Equity Curve)")
-    st.line_chart(equity_series)
-
-with g2:
-    st.caption("Ganhos x perdas por trade")
-    st.line_chart(df_sorted.set_index("data")[["ganhos", "perdas"]])
+ganhos_perdas_chart = (
+    alt.Chart(df_gl)
+    .mark_line(strokeWidth=3)
+    .encode(
+        x=alt.X("data:T", title="Data"),
+        y=alt.Y("valor:Q", title="Resultado por trade (R$)"),
+        color=alt.Color(
+            "tipo:N",
+            scale=alt.Scale(
+                domain=["ganhos", "perdas"],
+                range=["#1ab21a", "#e02424"]  # verde e vermelho
+            ),
+            legend=alt.Legend(title="Tipo")
+        ),
+        tooltip=["data", "tipo", "valor"]
+    )
+    .properties(
+        height=300,
+        title="Ganhos x Perdas por Trade"
+    )
+)
 
 # 3) Disciplina média por dia
 if "disciplina" in df_filtrado.columns:
     df_disc = df_filtrado.groupby("data", as_index=False).agg(
         disciplina_media=("disciplina", "mean")
     )
-    disc_series = df_disc.set_index("data")["disciplina_media"]
+    disciplina_chart = (
+        alt.Chart(df_disc)
+        .mark_line(strokeWidth=3, color="#9467bd")
+        .encode(
+            x=alt.X("data:T", title="Data"),
+            y=alt.Y("disciplina_media:Q", title="Disciplina média (0–100)"),
+            tooltip=["data", "disciplina_media"]
+        )
+        .properties(
+            height=300,
+            title="Disciplina Média por Dia"
+        )
+    )
 else:
-    disc_series = None
+    disciplina_chart = None
 
-st.caption("Disciplina média por dia")
-if disc_series is not None and not disc_series.empty:
-    st.line_chart(disc_series)
-else:
-    st.info("Ainda não há dados de disciplina suficientes para montar o gráfico.")
+# Layout dos gráficos
+st.altair_chart(equity_chart, use_container_width=True)
+
+col_g1, col_g2 = st.columns(2)
+with col_g1:
+    st.altair_chart(ganhos_perdas_chart, use_container_width=True)
+with col_g2:
+    if disciplina_chart is not None:
+        st.altair_chart(disciplina_chart, use_container_width=True)
+    else:
+        st.info("Ainda não há dados de disciplina suficientes para montar o gráfico.")
 
 # -----------------------------------------------------------------------------
 # TABELA RESUMO POR DIA
