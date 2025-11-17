@@ -85,7 +85,7 @@ if "ativo" in df.columns and not df["ativo"].dropna().empty:
 
 ativo = st.sidebar.text_input("Ativo", value=ativo_sugestao)
 
-# Ponto de entrada / saída (informativo)
+# Ponto de entrada / saída
 entrada = st.sidebar.number_input("Ponto de entrada", value=0.0, step=5.0, format="%.1f")
 saida = st.sidebar.number_input("Ponto de saída", value=0.0, step=5.0, format="%.1f")
 
@@ -97,14 +97,9 @@ num_contratos = st.sidebar.number_input(
     "Número de contratos", min_value=1, value=1, step=1
 )
 
-# Quantidade de operações (parciais dentro do mesmo trade)
+# Quantidade de operações (parciais dentro do mesmo trade) – APENAS CONTROLE, NÃO ENTRA NO CÁLCULO
 qtd_operacoes = st.sidebar.number_input(
     "Quantidade de operações", min_value=1, value=1, step=1
-)
-
-# Pontos / Ticks de resultado (pode ser positivo ou negativo)
-pontos_ticks = st.sidebar.number_input(
-    "Pontos / Ticks (gain ou loss)", value=0.0, step=5.0, format="%.1f"
 )
 
 # Custo por ponto (R$) – mini índice ~0.20
@@ -131,13 +126,20 @@ seguiu_regras = st.sidebar.checkbox("Segui 100% minhas regras?", value=True)
 # Comentários gerais
 comentarios = st.sidebar.text_area("Comentários adicionais", height=80)
 
-# --- Cálculos automáticos usando PONTOS/TICKS ---
+# --- Cálculo automático de PONTOS/TICKS a partir de ENTRADA/SAÍDA ---
+if direcao == "COMPRA":
+    pontos_por_operacao = saida - entrada
+else:  # VENDA
+    pontos_por_operacao = entrada - saida
+
+# NÃO multiplicamos por qtd_operacoes – ela é apenas controle
+total_pontos = pontos_por_operacao
+
 # Resultado oficial em R$ = nº contratos x pontos x custo_ponto
-total_pontos = pontos_ticks
 resultado_estimado = total_pontos * num_contratos * custo_ponto
 
 st.sidebar.markdown(
-    f"**Total de pontos (gain/loss)**: `{total_pontos:.1f}` pts\n\n"
+    f"**Pontos (gain/loss) da operação**: `{total_pontos:.1f}` pts\n\n"
     f"**Resultado estimado (R$)**: `R$ {resultado_estimado:.2f}`"
 )
 
@@ -173,9 +175,9 @@ if st.sidebar.button("➕ Adicionar ao diário"):
         "entrada": entrada,
         "saida": saida,
         "resultado_r": resultado_estimado,
-        "resultado_pts": total_pontos,
+        "resultado_pts": total_pontos,        # <- guarda os pontos calculados
         "num_contratos": num_contratos,
-        "qtd_operacoes": qtd_operacoes,
+        "qtd_operacoes": qtd_operacoes,      # <- só informativo/controle, NÃO entra no cálculo
         "custo_ponto": custo_ponto,
         "disciplina": disciplina_nota,
         "quebrou_regras": "NAO" if seguiu_regras else "SIM",
