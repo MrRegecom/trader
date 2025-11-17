@@ -1,13 +1,8 @@
-#import streamlit as st
-#import pandas as pd
-#import numpy as np
-#from io import StringIO
 import streamlit as st
 import pandas as pd
 import numpy as np
 from io import StringIO
-import matplotlib.pyplot as plt  # <-- ADICIONA ESTA LINHA
-
+import matplotlib.pyplot as plt
 
 # -----------------------------------------------------------------------------
 # CONFIG DA PÁGINA
@@ -67,15 +62,15 @@ df = st.session_state["df_trades"]
 # TÍTULO
 # -----------------------------------------------------------------------------
 st.title("🌡️ Termômetro do Trader")
-st.write("Dashboard de Daytrade com diário do trader, banca, performance e contexto de mercado.")
+st.write("Dashboard de Daytrade com diário do trader, banca, performance, disciplina e contexto de mercado.")
 
 # -----------------------------------------------------------------------------
-# SIDEBAR – DIÁRIO DO TRADER + FILTROS
+# FORMULÁRIO DO DIÁRIO DO TRADER (SIDEBAR)
 # -----------------------------------------------------------------------------
 st.sidebar.header("📓 Diário do Trader - Novo Trade")
 
-# Data (auto hoje, mas editável)
-data_trade = st.sidebar.date_input("Data do trade")
+# Data do trade (auto hoje, mas editável)
+data_trade = st.sidebar.date_input("Data do trade", value=pd.Timestamp.today())
 
 # Ativo com sugestão (último ativo ou WINZ25)
 ativo_sugestao = "WINZ25"
@@ -91,14 +86,26 @@ saida = st.sidebar.number_input("Ponto de saída", value=0.0, step=5.0, format="
 # Direção
 direcao = st.sidebar.radio("Direção", options=["COMPRA", "VENDA"])
 
+# Número de contratos
+num_contratos = st.sidebar.number_input(
+    "Número de contratos", min_value=1, value=1, step=1
+)
+
+# Quantidade de operações (ex: fez 3 entradas parciais dentro do mesmo trade)
+qtd_operacoes = st.sidebar.number_input(
+    "Quantidade de operações", min_value=1, value=1, step=1
+)
+
+# Custo por ponto (R$) – mini índice ~0.20
+custo_ponto = st.sidebar.number_input(
+    "Custo por ponto (R$)", min_value=0.0, value=0.20, step=0.05, format="%.2f"
+)
+
 # Setup do dia
 setup = st.sidebar.text_input("Setup do dia", value="")
 
 # Motivo da Entrada
 motivo_entrada = st.sidebar.text_area("Motivo da entrada", height=80)
-
-# Resultado (R$)
-resultado_r = st.sidebar.number_input("Resultado (R$)", value=0.0, step=5.0, format="%.2f")
 
 # Emocional
 emocional = st.sidebar.selectbox(
@@ -113,14 +120,27 @@ seguiu_regras = st.sidebar.checkbox("Segui 100% minhas regras?", value=True)
 # Comentários gerais
 comentarios = st.sidebar.text_area("Comentários adicionais", height=80)
 
-# Função para calcular disciplina
+# --- Cálculos automáticos de pontos e resultado ---
+if direcao == "COMPRA":
+    pontos_por_operacao = saida - entrada
+else:
+    pontos_por_operacao = entrada - saida
+
+total_pontos = pontos_por_operacao * qtd_operacoes
+resultado_estimado = total_pontos * num_contratos * custo_ponto
+
+st.sidebar.markdown(
+    f"**Total de pontos (gain/loss)**: `{total_pontos:.1f}` pts\n\n"
+    f"**Resultado estimado (R$)**: `R$ {resultado_estimado:.2f}`"
+)
+
+# Função para calcular disciplina (0–100)
 def calcular_disciplina(seguiu: bool, resultado: float) -> int:
     """
-    Regras que você descreveu:
-    - Se seguir as regras e ficar positivo: 71 a 100 (vamos usar 90)
-    - Se seguir as regras e ficar negativo: ainda disciplinado (vamos usar 80)
-    - Se NÃO seguir as regras e ficar positivo: 41 a 70 (vamos usar 60)
-    - Se NÃO seguir as regras e ficar negativo: 0 a 40 (vamos usar 30)
+    - Se seguir as regras e ficar positivo: 90 (faixa 71–100)
+    - Se seguir as regras e ficar negativo: 80 (disciplinado, mesmo com loss)
+    - Se NÃO seguir as regras e ficar positivo: 60 (faixa 41–70)
+    - Se NÃO seguir as regras e ficar negativo: 30 (faixa 0–40)
     """
     if seguiu:
         if resultado >= 0:
@@ -133,17 +153,11 @@ def calcular_disciplina(seguiu: bool, resultado: float) -> int:
         else:
             return 30
 
-# Botão para adicionar o trade ao diário
+disciplina_nota = calcular_disciplina(seguiu_regras, resultado_estimado)
+st.sidebar.markdown(f"### 🧭 Disciplina calculada: **{disciplina_nota} / 100**")
+
+# Botão para adicionar o trade ao diário (na sessão)
 if st.sidebar.button("➕ Adicionar ao diário"):
-    # calcula resultado em pontos (bem simples: saída - entrada, ajusta para compra/venda)
-    if direcao == "COMPRA":
-        resultado_pts = saida - entrada
-    else:
-        resultado_pts = entrada - saida
-
-    disciplina_nota = calcular_disciplina(seguiu_regras, resultado_r)
-    quebrou_regras = "NAO" if seguiu_regras else "SIM"
-
     nova_linha = {
         "data": pd.to_datetime(data_trade),
         "ativo": ativo,
@@ -151,25 +165,32 @@ if st.sidebar.button("➕ Adicionar ao diário"):
         "setup": setup,
         "entrada": entrada,
         "saida": saida,
-        "resultado_r": resultado_r,
-        "resultado_pts": resultado_pts,
+        "resultado_r": resultado_estimado,
+        "resultado_pts": total_pontos,
+        "num_contratos": num_contratos,
+        "qtd_operacoes": qtd_operacoes,
+        "custo_ponto": custo_ponto,
         "disciplina": disciplina_nota,
-        "quebrou_regras": quebrou_regras,
+        "quebrou_regras": "NAO" if seguiu_regras else "SIM",
         "comentarios": comentarios,
         "motivo_entrada": motivo_entrada,
         "emocional": emocional,
     }
 
-    # garante que todas as colunas existem
+    # garante colunas
     for col in nova_linha.keys():
         if col not in df.columns:
             df[col] = np.nan
 
-    st.session_state["df_trades"] = pd.concat([df, pd.DataFrame([nova_linha])], ignore_index=True)
+    st.session_state["df_trades"] = pd.concat(
+        [df, pd.DataFrame([nova_linha])], ignore_index=True
+    )
     df = st.session_state["df_trades"]
-    st.sidebar.success("Trade adicionado ao diário na sessão atual! ✅")
+    st.sidebar.success("Trade adicionado ao diário nesta sessão! ✅")
 
-# Separador na sidebar para filtros
+# -----------------------------------------------------------------------------
+# FILTROS DE VISUALIZAÇÃO (SIDEBAR)
+# -----------------------------------------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.header("Filtros de visualização")
 
@@ -201,7 +222,7 @@ data_termometro = st.sidebar.selectbox(
     index=len(datas_disponiveis) - 1,
 )
 
-# Botão para baixar CSV atualizado (diário + base)
+# Botão para baixar CSV atualizado (com os trades da sessão)
 st.sidebar.markdown("---")
 csv_buffer = StringIO()
 df.to_csv(csv_buffer, index=False)
@@ -231,12 +252,39 @@ if df_filtrado.empty:
     st.stop()
 
 # -----------------------------------------------------------------------------
+# PIZZA NA SIDEBAR – GANHOS x PERDAS DA SEMANA
+# -----------------------------------------------------------------------------
+ultimo_dia_semana = df_filtrado["data"].max()
+inicio_semana = ultimo_dia_semana - pd.Timedelta(days=6)
+
+df_semana = df_filtrado[
+    (df_filtrado["data"] >= inicio_semana) & (df_filtrado["data"] <= ultimo_dia_semana)
+]
+
+total_ganhos_semana = df_semana.loc[df_semana["resultado_r"] > 0, "resultado_r"].sum()
+total_perdas_semana = df_semana.loc[df_semana["resultado_r"] < 0, "resultado_r"].sum()
+
+valores_pizza = [max(total_ganhos_semana, 0), abs(min(total_perdas_semana, 0))]
+labels_pizza = ["Ganhos", "Perdas"]
+
+st.sidebar.markdown("### 📊 Semana (Ganhos x Perdas)")
+if sum(valores_pizza) == 0:
+    st.sidebar.info("Ainda não há dados suficientes nesta semana para o gráfico.")
+else:
+    fig_pizza, ax_pizza = plt.subplots()
+    ax_pizza.pie(valores_pizza, labels=labels_pizza, autopct="%1.1f%%", startangle=90)
+    ax_pizza.axis("equal")
+    st.sidebar.pyplot(fig_pizza)
+
+# -----------------------------------------------------------------------------
 # RESUMO POR DIA (P/ EQUITY E TERMÔMETRO)
 # -----------------------------------------------------------------------------
 df_dias = df_filtrado.groupby("data", as_index=False).agg(
     lucro_dia=("resultado_r", "sum"),
     qtd_trades=("resultado_r", "count"),
-    media_disciplina=("disciplina", "mean") if "disciplina" in df_filtrado.columns else ("resultado_r", "count"),
+    media_disciplina=("disciplina", "mean")
+    if "disciplina" in df_filtrado.columns
+    else ("resultado_r", "count"),
 )
 
 saldos = []
@@ -260,8 +308,7 @@ for _, row in df_dias.iterrows():
         }
     )
 
-df_equity = pd.DataFrame(saldos)
-df_equity = df_equity.sort_values("data")
+df_equity = pd.DataFrame(saldos).sort_values("data")
 
 banca_final = df_equity["banca_fim_dia"].iloc[-1]
 lucro_total = banca_final - banca_inicial
@@ -276,41 +323,45 @@ losses = df_filtrado[df_filtrado["resultado_r"] < 0]
 
 qtd_wins = wins.shape[0]
 qtd_losses = losses.shape[0]
-
 win_rate = (qtd_wins / total_trades) * 100 if total_trades > 0 else 0.0
 
-# % acerto diário
 dias_positivos = df_dias[df_dias["lucro_dia"] > 0].shape[0]
 dias_totais = df_dias.shape[0]
 win_rate_dias = (dias_positivos / dias_totais) * 100 if dias_totais > 0 else 0.0
 
-# Fator de lucro
 gross_profit = wins["resultado_r"].sum()
 gross_loss = losses["resultado_r"].sum()
 profit_factor = gross_profit / abs(gross_loss) if gross_loss < 0 else np.nan
 
-# Expectativa por trade
 avg_win = wins["resultado_r"].mean() if not wins.empty else 0.0
 avg_loss = losses["resultado_r"].mean() if not losses.empty else 0.0
 prob_win = qtd_wins / total_trades if total_trades > 0 else 0.0
 prob_loss = 1 - prob_win
 expectativa_trade = prob_win * avg_win + prob_loss * avg_loss
 
-# Último dia / mês / ano
 ultimo_dia = df_equity["data"].iloc[-1]
 lucro_ultimo_dia = df_equity["lucro_dia"].iloc[-1]
 perc_ultimo_dia = df_equity["perc_dia"].iloc[-1]
 
 mes_ref = ultimo_dia.month
 ano_ref = ultimo_dia.year
-df_mes = df_equity[(df_equity["data"].dt.month == mes_ref) & (df_equity["data"].dt.year == ano_ref)]
+df_mes = df_equity[
+    (df_equity["data"].dt.month == mes_ref) & (df_equity["data"].dt.year == ano_ref)
+]
 ganho_mes = df_mes["lucro_dia"].sum()
 
 df_ano = df_equity[df_equity["data"].dt.year == ano_ref]
 ganho_ano = df_ano["lucro_dia"].sum()
 
+# Disciplina média geral
+media_disc_total = (
+    df_filtrado["disciplina"].mean()
+    if "disciplina" in df_filtrado.columns
+    else np.nan
+)
+
 # -----------------------------------------------------------------------------
-# VISÃO GERAL (CARDS SIMPLES)
+# VISÃO GERAL (CARDS)
 # -----------------------------------------------------------------------------
 st.subheader("📊 Visão Geral")
 
@@ -331,23 +382,48 @@ c9, c10, c11, c12 = st.columns(4)
 c9.metric("Expectativa por trade", f"R$ {expectativa_trade:,.2f}")
 c10.metric("% acerto (trades)", f"{win_rate:,.2f}%", f"{qtd_wins} W / {qtd_losses} L")
 c11.metric("% acerto diário", f"{win_rate_dias:,.2f}%", f"{dias_positivos} dias positivos")
-media_disc_total = df_filtrado["disciplina"].mean() if "disciplina" in df_filtrado.columns else np.nan
 disc_txt = f"{media_disc_total:,.1f}" if not np.isnan(media_disc_total) else "–"
-c12.metric("Disciplina média (trades)", disc_txt)
+c12.metric("Disciplina média (0–100)", disc_txt)
 
 # -----------------------------------------------------------------------------
-# GRÁFICOS
+# GRÁFICOS – BANCA, GAINS/LOSS, DISCIPLINA
 # -----------------------------------------------------------------------------
-st.subheader("📈 Evolução da banca e do resultado diário")
+st.subheader("📈 Gráficos de evolução")
+
+# 1) Banca total (equity)
+equity_series = df_equity.set_index("data")["banca_fim_dia"]
+
+# 2) Gains x Loss trade a trade
+df_sorted = df_filtrado.sort_values("data").copy()
+df_sorted["acumulado"] = df_sorted["resultado_r"].cumsum()
+df_sorted["ganhos"] = df_sorted["resultado_r"].where(df_sorted["resultado_r"] > 0, 0)
+df_sorted["perdas"] = df_sorted["resultado_r"].where(df_sorted["resultado_r"] < 0, 0)
+
+# 3) Disciplina média por dia
+if "disciplina" in df_filtrado.columns:
+    df_disc = df_filtrado.groupby("data", as_index=False).agg(
+        disciplina_media=("disciplina", "mean")
+    )
+    disc_series = df_disc.set_index("data")["disciplina_media"]
+else:
+    df_disc = None
+    disc_series = None
+
 g1, g2 = st.columns(2)
 
 with g1:
-    st.caption("Equity Curve (banca ao final de cada dia)")
-    st.line_chart(df_equity.set_index("data")["banca_fim_dia"])
+    st.caption("Banca total (Equity Curve)")
+    st.line_chart(equity_series)
 
 with g2:
-    st.caption("Lucro por dia (R$)")
-    st.bar_chart(df_equity.set_index("data")["lucro_dia"])
+    st.caption("Ganhos x perdas por trade")
+    st.line_chart(df_sorted.set_index("data")[["ganhos", "perdas"]])
+
+st.caption("Disciplina média por dia")
+if disc_series is not None and not disc_series.empty:
+    st.line_chart(disc_series)
+else:
+    st.info("Ainda não há dados de disciplina suficientes para montar o gráfico.")
 
 # -----------------------------------------------------------------------------
 # TABELA RESUMO POR DIA
@@ -385,9 +461,13 @@ if linha_dia.empty:
 else:
     linha_dia = linha_dia.iloc[0]
 
-    disciplina_media = linha_dia["media_disciplina"] if not pd.isna(linha_dia["media_disciplina"]) else 0.0
-    score_disciplina = disciplina_media * 10 / 100 * 40  # normaliza para peso 40
+    disciplina_media_dia = (
+        linha_dia["media_disciplina"] if not pd.isna(linha_dia["media_disciplina"]) else 0.0
+    )
+    # disciplina (peso 40)
+    score_disciplina = (disciplina_media_dia / 100) * 40
 
+    # resultado do dia (peso 30)
     perc_dia = linha_dia["perc_dia"]
     perc_clamp = max(min(perc_dia, 10), -10)
     if perc_clamp >= 2:
