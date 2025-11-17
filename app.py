@@ -13,6 +13,8 @@ st.set_page_config(
     layout="wide",
 )
 
+BANCA_INICIAL_PADRAO = 200.0
+
 # -----------------------------------------------------------------------------
 # FUNÇÕES DE CARGA
 # -----------------------------------------------------------------------------
@@ -64,8 +66,12 @@ df = st.session_state["df_trades"]
 st.title("🌡️ Termômetro do Trader")
 st.write("Dashboard de Daytrade com diário do trader, banca, performance, disciplina e contexto de mercado.")
 
+# =============================================================================
+# SIDEBAR – DIÁRIO DO TRADER + PIZZA + DOWNLOAD
+# =============================================================================
+
 # -----------------------------------------------------------------------------
-# FORMULÁRIO DO DIÁRIO DO TRADER (SIDEBAR)
+# FORMULÁRIO DO DIÁRIO DO TRADER
 # -----------------------------------------------------------------------------
 st.sidebar.header("📓 Diário do Trader - Novo Trade")
 
@@ -79,7 +85,7 @@ if "ativo" in df.columns and not df["ativo"].dropna().empty:
 
 ativo = st.sidebar.text_input("Ativo", value=ativo_sugestao)
 
-# Ponto de entrada / saída
+# Ponto de entrada / saída (informativo)
 entrada = st.sidebar.number_input("Ponto de entrada", value=0.0, step=5.0, format="%.1f")
 saida = st.sidebar.number_input("Ponto de saída", value=0.0, step=5.0, format="%.1f")
 
@@ -91,9 +97,14 @@ num_contratos = st.sidebar.number_input(
     "Número de contratos", min_value=1, value=1, step=1
 )
 
-# Quantidade de operações (ex: fez 3 entradas parciais dentro do mesmo trade)
+# Quantidade de operações (parciais dentro do mesmo trade)
 qtd_operacoes = st.sidebar.number_input(
     "Quantidade de operações", min_value=1, value=1, step=1
+)
+
+# Pontos / Ticks de resultado (pode ser positivo ou negativo)
+pontos_ticks = st.sidebar.number_input(
+    "Pontos / Ticks (gain ou loss)", value=0.0, step=5.0, format="%.1f"
 )
 
 # Custo por ponto (R$) – mini índice ~0.20
@@ -120,13 +131,9 @@ seguiu_regras = st.sidebar.checkbox("Segui 100% minhas regras?", value=True)
 # Comentários gerais
 comentarios = st.sidebar.text_area("Comentários adicionais", height=80)
 
-# --- Cálculos automáticos de pontos e resultado ---
-if direcao == "COMPRA":
-    pontos_por_operacao = saida - entrada
-else:
-    pontos_por_operacao = entrada - saida
-
-total_pontos = pontos_por_operacao * qtd_operacoes
+# --- Cálculos automáticos usando PONTOS/TICKS ---
+# Resultado oficial em R$ = nº contratos x pontos x custo_ponto
+total_pontos = pontos_ticks
 resultado_estimado = total_pontos * num_contratos * custo_ponto
 
 st.sidebar.markdown(
@@ -189,40 +196,35 @@ if st.sidebar.button("➕ Adicionar ao diário"):
     st.sidebar.success("Trade adicionado ao diário nesta sessão! ✅")
 
 # -----------------------------------------------------------------------------
-# FILTROS DE VISUALIZAÇÃO (SIDEBAR)
+# PIZZA DA SEMANA + DOWNLOAD
 # -----------------------------------------------------------------------------
 st.sidebar.markdown("---")
-st.sidebar.header("Filtros de visualização")
+st.sidebar.markdown("### 📊 Semana (Ganhos x Perdas)")
 
-banca_inicial = st.sidebar.number_input(
-    "Banca inicial (R$)", min_value=0.0, value=200.0, step=50.0
-)
+if df.empty:
+    st.sidebar.info("Ainda não há trades cadastrados.")
+else:
+    ultimo_dia_semana = df["data"].max()
+    inicio_semana = ultimo_dia_semana - pd.Timedelta(days=6)
 
-datas_disponiveis = df["data"].dt.date.unique()
-datas_disponiveis = np.sort(datas_disponiveis)
+    df_semana = df[
+        (df["data"] >= inicio_semana) & (df["data"] <= ultimo_dia_semana)
+    ]
 
-if len(datas_disponiveis) == 0:
-    st.info("Nenhum dado em trades (nem da planilha e nem do diário).")
-    st.stop()
+    total_ganhos_semana = df_semana.loc[df_semana["resultado_r"] > 0, "resultado_r"].sum()
+    total_perdas_semana = df_semana.loc[df_semana["resultado_r"] < 0, "resultado_r"].sum()
 
-data_inicial = st.sidebar.date_input(
-    "Data inicial (filtro trades)",
-    value=datas_disponiveis[0],
-)
-data_final = st.sidebar.date_input(
-    "Data final (filtro trades)",
-    value=datas_disponiveis[-1],
-)
+    valores_pizza = [max(total_ganhos_semana, 0), abs(min(total_perdas_semana, 0))]
+    labels_pizza = ["Ganhos", "Perdas"]
 
-ativo_filtro = st.sidebar.text_input("Filtrar por ativo (ex: WIN)", value="")
+    if sum(valores_pizza) == 0:
+        st.sidebar.info("Ainda não há dados suficientes nesta semana para o gráfico.")
+    else:
+        fig_pizza, ax_pizza = plt.subplots()
+        ax_pizza.pie(valores_pizza, labels=labels_pizza, autopct="%1.1f%%", startangle=90)
+        ax_pizza.axis("equal")
+        st.sidebar.pyplot(fig_pizza)
 
-data_termometro = st.sidebar.selectbox(
-    "Dia para análise do Termômetro",
-    options=datas_disponiveis,
-    index=len(datas_disponiveis) - 1,
-)
-
-# Botão para baixar CSV atualizado (com os trades da sessão)
 st.sidebar.markdown("---")
 csv_buffer = StringIO()
 df.to_csv(csv_buffer, index=False)
@@ -233,48 +235,18 @@ st.sidebar.download_button(
     mime="text/csv",
 )
 
-# -----------------------------------------------------------------------------
-# APLICAR FILTROS NOS TRADES
-# -----------------------------------------------------------------------------
-df_filtrado = df.copy()
+# =============================================================================
+# PARTE PRINCIPAL – CÁLCULOS E DASHBOARD
+# =============================================================================
 
-if data_inicial:
-    df_filtrado = df_filtrado[df_filtrado["data"].dt.date >= data_inicial]
-if data_final:
-    df_filtrado = df_filtrado[df_filtrado["data"].dt.date <= data_final]
-if ativo_filtro.strip():
-    df_filtrado = df_filtrado[
-        df_filtrado["ativo"].astype(str).str.contains(ativo_filtro.strip(), case=False)
-    ]
-
-if df_filtrado.empty:
-    st.info("Nenhum trade encontrado com os filtros atuais.")
+if df.empty:
+    st.info("Nenhum trade para exibir ainda. Registre um trade na lateral.")
     st.stop()
 
-# -----------------------------------------------------------------------------
-# PIZZA NA SIDEBAR – GANHOS x PERDAS DA SEMANA
-# -----------------------------------------------------------------------------
-ultimo_dia_semana = df_filtrado["data"].max()
-inicio_semana = ultimo_dia_semana - pd.Timedelta(days=6)
+# Vamos usar SEMPRE todos os trades para os cálculos
+df_filtrado = df.copy()
 
-df_semana = df_filtrado[
-    (df_filtrado["data"] >= inicio_semana) & (df_filtrado["data"] <= ultimo_dia_semana)
-]
-
-total_ganhos_semana = df_semana.loc[df_semana["resultado_r"] > 0, "resultado_r"].sum()
-total_perdas_semana = df_semana.loc[df_semana["resultado_r"] < 0, "resultado_r"].sum()
-
-valores_pizza = [max(total_ganhos_semana, 0), abs(min(total_perdas_semana, 0))]
-labels_pizza = ["Ganhos", "Perdas"]
-
-st.sidebar.markdown("### 📊 Semana (Ganhos x Perdas)")
-if sum(valores_pizza) == 0:
-    st.sidebar.info("Ainda não há dados suficientes nesta semana para o gráfico.")
-else:
-    fig_pizza, ax_pizza = plt.subplots()
-    ax_pizza.pie(valores_pizza, labels=labels_pizza, autopct="%1.1f%%", startangle=90)
-    ax_pizza.axis("equal")
-    st.sidebar.pyplot(fig_pizza)
+banca_inicial = BANCA_INICIAL_PADRAO
 
 # -----------------------------------------------------------------------------
 # RESUMO POR DIA (P/ EQUITY E TERMÔMETRO)
@@ -353,7 +325,6 @@ ganho_mes = df_mes["lucro_dia"].sum()
 df_ano = df_equity[df_equity["data"].dt.year == ano_ref]
 ganho_ano = df_ano["lucro_dia"].sum()
 
-# Disciplina média geral
 media_disc_total = (
     df_filtrado["disciplina"].mean()
     if "disciplina" in df_filtrado.columns
@@ -369,7 +340,7 @@ c1, c2, c3, c4 = st.columns(4)
 c1.metric("Banca inicial", f"R$ {banca_inicial:,.2f}")
 c2.metric("Banca atual", f"R$ {banca_final:,.2f}", f"{lucro_total:,.2f} R$")
 c3.metric("% acumulado", f"{perc_total:,.2f}%")
-c4.metric("Total de trades (filtro)", int(total_trades))
+c4.metric("Total de trades", int(total_trades))
 
 c5, c6, c7, c8 = st.columns(4)
 c5.metric("Ganho último dia", f"R$ {lucro_ultimo_dia:,.2f}", f"{perc_ultimo_dia:,.2f}%")
@@ -395,19 +366,8 @@ equity_series = df_equity.set_index("data")["banca_fim_dia"]
 
 # 2) Gains x Loss trade a trade
 df_sorted = df_filtrado.sort_values("data").copy()
-df_sorted["acumulado"] = df_sorted["resultado_r"].cumsum()
 df_sorted["ganhos"] = df_sorted["resultado_r"].where(df_sorted["resultado_r"] > 0, 0)
 df_sorted["perdas"] = df_sorted["resultado_r"].where(df_sorted["resultado_r"] < 0, 0)
-
-# 3) Disciplina média por dia
-if "disciplina" in df_filtrado.columns:
-    df_disc = df_filtrado.groupby("data", as_index=False).agg(
-        disciplina_media=("disciplina", "mean")
-    )
-    disc_series = df_disc.set_index("data")["disciplina_media"]
-else:
-    df_disc = None
-    disc_series = None
 
 g1, g2 = st.columns(2)
 
@@ -418,6 +378,15 @@ with g1:
 with g2:
     st.caption("Ganhos x perdas por trade")
     st.line_chart(df_sorted.set_index("data")[["ganhos", "perdas"]])
+
+# 3) Disciplina média por dia
+if "disciplina" in df_filtrado.columns:
+    df_disc = df_filtrado.groupby("data", as_index=False).agg(
+        disciplina_media=("disciplina", "mean")
+    )
+    disc_series = df_disc.set_index("data")["disciplina_media"]
+else:
+    disc_series = None
 
 st.caption("Disciplina média por dia")
 if disc_series is not None and not disc_series.empty:
@@ -447,12 +416,13 @@ st.dataframe(
 # -----------------------------------------------------------------------------
 # TRADES DETALHADOS
 # -----------------------------------------------------------------------------
-st.subheader("📋 Trades detalhados (após filtros)")
+st.subheader("📋 Trades detalhados")
 st.dataframe(df_filtrado, use_container_width=True)
 
 # -----------------------------------------------------------------------------
-# TERMÔMETRO DO TRADER – DIA ESPECÍFICO
+# TERMÔMETRO DO TRADER – SEMPRE NO ÚLTIMO DIA
 # -----------------------------------------------------------------------------
+data_termometro = df_equity["data"].iloc[-1].date()
 st.subheader(f"🌡️ Termômetro do Trader – {data_termometro}")
 
 linha_dia = df_equity[df_equity["data"].dt.date == data_termometro]
